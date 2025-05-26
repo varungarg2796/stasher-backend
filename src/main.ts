@@ -9,11 +9,12 @@ async function bootstrap() {
 
   app.setGlobalPrefix('api');
   // Enable CORS for all origins
+  // src/main.ts
   app.enableCors({
-    origin: '*', // Allow all origins
-    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE', // Allow specific HTTP methods
-    allowedHeaders: 'Content-Type, Accept, Authorization', // Allow specific headers
-    credentials: true, // Allow cookies to be sent
+    origin: process.env.FRONTEND_BASE_URL || 'http://localhost:3001', // Read from .env
+    methods: 'GET,HEAD,PUT,PATCH,POST,DELETE',
+    allowedHeaders: 'Content-Type, Accept, Authorization',
+    credentials: true,
   });
   app.use(cookieParser());
 

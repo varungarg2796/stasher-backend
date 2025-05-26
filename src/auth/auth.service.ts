@@ -106,8 +106,6 @@ export class AuthService {
     console.log(
       `Generated tokens for user ${payload.sub}: Access Token (expires in ${accessExpiration}), Refresh Token (expires in ${refreshExpiration})`,
     );
-    console.log(`Access Token: ${accessToken}... (truncated for security)`);
-    console.log(`Refresh Token: ${refreshToken}... (truncated for security)`);
     try {
       const refreshTokenHash = await this.hashToken(refreshToken);
       const expiryDate = this.calculateExpiryDate(refreshExpiration);
