@@ -20,6 +20,7 @@ model User {
   googleId      String?   @unique @map("google_id")
   email         String    @unique
   username      String    @unique
+  currency      String?   @default("INR") // Add this line
   name          String?
   password      String?   // Kept for future email/pass auth
   avatarUrl     String?   @map("avatar_url")
