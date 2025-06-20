@@ -1,3 +1,4 @@
+// prisma/schema.prisma
 generator client {
   provider = "prisma-client-js"
 }
@@ -7,16 +8,30 @@ datasource db {
   url      = env("DATABASE_URL")
 }
 
+// --- User and Auth Models ---
+
+enum UserPlan {
+  FREE
+  PREMIUM
+}
+
 model User {
   id            String    @id @default(uuid())
   googleId      String?   @unique @map("google_id")
   email         String    @unique
   username      String    @unique
   name          String?
-  password      String?   // can be used in the future for a traditional login 
+  password      String?   // Kept for future email/pass auth
   avatarUrl     String?   @map("avatar_url")
+  plan          UserPlan  @default(FREE)
   createdAt     DateTime  @default(now()) @map("created_at")
   updatedAt     DateTime  @updatedAt @map("updated_at")
+
+  // Relations
+  items         Item[]
+  collections   Collection[]
+  locations     Location[]
+  tags          Tag[]
   refreshTokens RefreshToken[]
 
   @@map("users")
@@ -34,6 +49,131 @@ model RefreshToken {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
-  @@index([expiresAt])
   @@map("refresh_tokens")
+}
+
+// --- Core Application Models ---
+
+model Item {
+  id              String      @id @default(cuid())
+  name            String
+  description     String?
+  imageUrl        String?
+  iconType        String?
+  quantity        Int         @default(1)
+  price           Float?
+  priceless       Boolean     @default(false)
+  archived        Boolean     @default(false)
+  acquisitionDate DateTime?   @map("acquisition_date")
+  expiryDate      DateTime?   @map("expiry_date")
+  createdAt       DateTime    @default(now()) @map("created_at")
+  updatedAt       DateTime    @updatedAt @map("updated_at")
+  
+  ownerId         String      @map("owner_id")
+  owner           User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  
+  locationId      String?     @map("location_id")
+  location        Location?   @relation(fields: [locationId], references: [id], onUpdate: NoAction, onDelete: SetNull)
+
+  tags            ItemTag[]
+  collections     CollectionItem[]
+  history         ItemHistory[]
+
+  @@index([ownerId])
+  @@index([locationId])
+  @@map("items")
+}
+
+model ItemHistory {
+    id        String    @id @default(cuid())
+    action    String    // e.g., "created", "used", "gifted", "archived"
+    note      String?
+    date      DateTime  @default(now())
+
+    itemId    String    @map("item_id")
+    item      Item      @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+    @@map("item_history")
+}
+
+model Location {
+  id        String   @id @default(cuid())
+  name      String
+  
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  
+  items     Item[]
+
+  @@unique([name, userId])
+  @@map("locations")
+}
+
+model Tag {
+  id        String   @id @default(cuid())
+  name      String
+  
+  userId    String   @map("user_id")
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  items     ItemTag[]
+
+  @@unique([name, userId])
+  @@map("tags")
+}
+
+model ItemTag {
+  itemId String @map("item_id")
+  tagId  String @map("tag_id")
+
+  item   Item   @relation(fields: [itemId], references: [id], onDelete: Cascade)
+  tag    Tag    @relation(fields: [tagId], references: [id], onDelete: Cascade)
+
+  @@id([itemId, tagId])
+  @@map("item_tags")
+}
+
+model Collection {
+  id              String      @id @default(cuid())
+  name            String
+  description     String?
+  coverImage      String?
+  createdAt       DateTime    @default(now()) @map("created_at")
+  updatedAt       DateTime    @updatedAt @map("updated_at")
+
+  ownerId         String      @map("owner_id")
+  owner           User        @relation(fields: [ownerId], references: [id], onDelete: Cascade)
+  
+  items           CollectionItem[]
+  shareSettings   ShareSettings?
+
+  @@index([ownerId])
+  @@map("collections")
+}
+
+model CollectionItem {
+  id              String      @id @default(cuid())
+  collectionNote  String?
+  order           Int
+
+  collectionId    String      @map("collection_id")
+  collection      Collection  @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+  
+  itemId          String      @map("item_id")
+  item            Item        @relation(fields: [itemId], references: [id], onDelete: Cascade)
+
+  @@unique([collectionId, itemId])
+  @@map("collection_items")
+}
+
+model ShareSettings {
+  id              String      @id @default(cuid())
+  isEnabled       Boolean     @default(false)
+  shareId         String      @unique @default(cuid())
+  displaySettings Json
+
+  collectionId    String      @unique @map("collection_id")
+  collection      Collection  @relation(fields: [collectionId], references: [id], onDelete: Cascade)
+
+  @@map("share_settings")
 }
