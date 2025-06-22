@@ -15,9 +15,22 @@ export class ItemsService {
   constructor(private prisma: PrismaService) {}
 
   /**
-   * Validates that the provided location and tag names exist for the user.
+   * Private helper to format a Prisma item object into a clean DTO for the frontend.
+   */
+  private formatItemResponse(item: any) {
+    // This function can accept a raw item or one with nested history
+    const { tags, location, history, ...rest } = item;
+    return {
+      ...rest,
+      location: location?.name || null,
+      tags: tags?.map((itemTag) => itemTag.tag.name) || [],
+      history: history || [], // Ensure history is an array
+    };
+  }
+
+  /**
+   * Validates that provided location and tag names exist for the user.
    * Throws a BadRequestException if any are not found.
-   * @returns An object with the validated locationId and an array of tagIds.
    */
   private async getAndValidateRelationIds(
     tx: Prisma.TransactionClient,
@@ -52,7 +65,6 @@ export class ItemsService {
       }
       tagIds.push(...tags.map((t) => t.id));
     }
-
     return { locationId, tagIds };
   }
 
@@ -67,44 +79,39 @@ export class ItemsService {
     const { location, tags, acquisitionDate, expiryDate, ...itemData } =
       createItemDto;
 
-    return this.prisma.$transaction(async (tx) => {
-      // STRICT VALIDATION: Ensure all relations exist before creating.
+    const createdItem = await this.prisma.$transaction(async (tx) => {
       const { locationId, tagIds } = await this.getAndValidateRelationIds(
         tx,
         userId,
         location,
         tags,
       );
-
       return tx.item.create({
         data: {
           ...itemData,
           owner: { connect: { id: userId } },
-          // Only use connect, never create.
           location: locationId ? { connect: { id: locationId } } : undefined,
-          tags: {
-            create: tagIds.map((id) => ({
-              tag: { connect: { id } },
-            })),
-          },
+          tags: { create: tagIds.map((id) => ({ tag: { connect: { id } } })) },
           acquisitionDate: acquisitionDate
             ? new Date(acquisitionDate)
             : undefined,
           expiryDate: expiryDate ? new Date(expiryDate) : undefined,
           history: { create: { action: 'created' } },
         },
+        include: { location: true, tags: { include: { tag: true } } },
       });
     });
+
+    return this.formatItemResponse(createdItem);
   }
 
   async update(id: string, updateItemDto: UpdateItemDto, userId: string) {
-    await this.findOne(id, userId); // Ownership check
+    await this.findOne(id, userId, true); // Use findOne for ownership check
 
-    return this.prisma.$transaction(async (tx) => {
+    const updatedItem = await this.prisma.$transaction(async (tx) => {
       const { location, tags, acquisitionDate, expiryDate, ...itemData } =
         updateItemDto;
 
-      // STRICT VALIDATION: Ensure all relations exist before updating.
       const { locationId, tagIds } = await this.getAndValidateRelationIds(
         tx,
         userId,
@@ -138,54 +145,13 @@ export class ItemsService {
           expiryDate: expiryDate ? new Date(expiryDate) : undefined,
           history: { create: { action: 'updated' } },
         },
+        include: { location: true, tags: { include: { tag: true } } },
       });
     });
+
+    return this.formatItemResponse(updatedItem);
   }
 
-  async bulkCreate(bulkCreateDto: BulkCreateItemDto, userId: string) {
-    const itemsToCreate = bulkCreateDto.items;
-    const currentItemCount = await this.prisma.item.count({
-      where: { ownerId: userId, archived: false },
-    });
-    if (currentItemCount + itemsToCreate.length > 40) {
-      throw new ForbiddenException(`Your plan limit of 40 would be exceeded.`);
-    }
-
-    return this.prisma.$transaction(async (tx) => {
-      const createdItems = [];
-      for (const itemDto of itemsToCreate) {
-        // STRICT VALIDATION for each item in the bulk request
-        const { locationId, tagIds } = await this.getAndValidateRelationIds(
-          tx,
-          userId,
-          itemDto.location,
-          itemDto.tags,
-        );
-
-        const { acquisitionDate, expiryDate, ...itemData } = itemDto;
-
-        const newItem = await tx.item.create({
-          data: {
-            ...itemData,
-            owner: { connect: { id: userId } },
-            location: locationId ? { connect: { id: locationId } } : undefined,
-            tags: {
-              create: tagIds.map((id) => ({ tag: { connect: { id } } })),
-            },
-            acquisitionDate: acquisitionDate
-              ? new Date(acquisitionDate)
-              : undefined,
-            expiryDate: expiryDate ? new Date(expiryDate) : undefined,
-            history: { create: { action: 'created' } },
-          },
-        });
-        createdItems.push(newItem);
-      }
-      return { message: `${createdItems.length} items created successfully.` };
-    });
-  }
-
-  // FindAll and FindOne methods remain unchanged.
   async findAll(userId: string, queryDto: FindAllItemsDto) {
     const { search, location, tag, archived, sort, page, limit } = queryDto;
     const skip = (page - 1) * limit;
@@ -228,18 +194,21 @@ export class ItemsService {
       this.prisma.item.count({ where }),
     ]);
 
+    // Manually format the response here
+    const formattedData = items.map((item) => ({
+      ...item,
+      tags: item.tags.map((t) => t.tag.name),
+      location: item.location?.name || null,
+    }));
+
     return {
-      data: items.map((item) => ({
-        ...item,
-        tags: item.tags.map((t) => t.tag.name),
-        location: item.location?.name || null,
-      })),
+      data: formattedData,
       totalPages: Math.ceil(totalItems / limit),
       currentPage: page,
     };
   }
 
-  async findOne(id: string, userId: string) {
+  async findOne(id: string, userId: string, raw = false) {
     const item = await this.prisma.item.findUnique({
       where: { id },
       include: {
@@ -252,15 +221,53 @@ export class ItemsService {
     if (!item || item.ownerId !== userId) {
       throw new ForbiddenException('Access to this resource is denied.');
     }
-    return {
-      ...item,
-      tags: item.tags.map((t) => t.tag.name),
-      location: item.location?.name || null,
-    };
+
+    if (raw) return item;
+    return this.formatItemResponse(item);
   }
 
   async remove(id: string, userId: string) {
-    await this.findOne(id, userId);
+    await this.findOne(id, userId, true);
     await this.prisma.item.delete({ where: { id } });
+  }
+
+  async bulkCreate(bulkCreateDto: BulkCreateItemDto, userId: string) {
+    const itemsToCreate = bulkCreateDto.items;
+    const currentItemCount = await this.prisma.item.count({
+      where: { ownerId: userId, archived: false },
+    });
+    if (currentItemCount + itemsToCreate.length > 40) {
+      throw new ForbiddenException(`Your plan limit of 40 would be exceeded.`);
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const createdItems = [];
+      for (const itemDto of itemsToCreate) {
+        const { location, tags, acquisitionDate, expiryDate, ...itemData } =
+          itemDto;
+        const { locationId, tagIds } = await this.getAndValidateRelationIds(
+          tx,
+          userId,
+          location,
+          tags,
+        );
+
+        const newItem = await tx.item.create({
+          data: {
+            ...itemData,
+            ownerId: userId,
+            locationId: locationId,
+            tags: { create: tagIds.map((id) => ({ tagId: id })) },
+            acquisitionDate: acquisitionDate
+              ? new Date(acquisitionDate)
+              : undefined,
+            expiryDate: expiryDate ? new Date(expiryDate) : undefined,
+            history: { create: { action: 'created' } },
+          },
+        });
+        createdItems.push(newItem);
+      }
+      return { message: `${createdItems.length} items created successfully.` };
+    });
   }
 }
