@@ -19,6 +19,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { Request } from 'express';
 import { FindAllItemsDto } from './dto/find-all-items.dto';
 import { BulkCreateItemDto } from './dto/bulk-create-item.dto';
+import { ItemActionDto } from './dto/item-action.dto';
 
 interface RequestWithUser extends Request {
   user: { id: string };
@@ -36,6 +37,7 @@ export class ItemsController {
 
   @Get()
   findAll(@Req() req: RequestWithUser, @Query() queryDto: FindAllItemsDto) {
+    console.log('Query DTO:', queryDto);
     return this.itemsService.findAll(req.user.id, queryDto);
   }
 
@@ -65,5 +67,41 @@ export class ItemsController {
     @Req() req: RequestWithUser,
   ) {
     return this.itemsService.bulkCreate(bulkCreateItemDto, req.user.id);
+  }
+
+  @Post(':id/archive')
+  archive(
+    @Param('id') id: string,
+    @Req() req: RequestWithUser,
+    @Body() itemActionDto: ItemActionDto,
+  ) {
+    return this.itemsService.archive(id, req.user.id, itemActionDto.note);
+  }
+
+  @Post(':id/restore')
+  restore(
+    @Param('id') id: string,
+    @Req() req: RequestWithUser,
+    @Body() itemActionDto: ItemActionDto,
+  ) {
+    return this.itemsService.restore(id, req.user.id, itemActionDto.note);
+  }
+
+  @Post(':id/gift')
+  gift(
+    @Param('id') id: string,
+    @Req() req: RequestWithUser,
+    @Body() itemActionDto: ItemActionDto,
+  ) {
+    return this.itemsService.gift(id, req.user.id, itemActionDto.note);
+  }
+
+  @Post(':id/use')
+  use(
+    @Param('id') id: string,
+    @Req() req: RequestWithUser,
+    @Body() itemActionDto: ItemActionDto,
+  ) {
+    return this.itemsService.use(id, req.user.id, itemActionDto.note);
   }
 }

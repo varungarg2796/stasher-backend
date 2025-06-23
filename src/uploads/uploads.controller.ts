@@ -27,7 +27,7 @@ export class UploadsController {
       new ParseFilePipe({
         validators: [
           // 1 MB file size limit
-          new MaxFileSizeValidator({ maxSize: 1024 * 1024 * 1 }),
+          new MaxFileSizeValidator({ maxSize: 1024 * 1024 * 2 }),
           // Regex for allowed image types
           new FileTypeValidator({ fileType: '.(png|jpeg|jpg|webp|gif)' }),
         ],

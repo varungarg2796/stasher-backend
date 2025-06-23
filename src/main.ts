@@ -1,11 +1,14 @@
 // dayssince-backend/src/main.ts
-import { NestFactory } from '@nestjs/core';
+import { HttpAdapterHost, NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import * as cookieParser from 'cookie-parser';
 import { ValidationPipe } from '@nestjs/common';
+import { HttpExceptionLoggingFilter } from './common/filters/http-exception-logging.filter';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+  const httpAdapterHost = app.get(HttpAdapterHost);
+  app.useGlobalFilters(new HttpExceptionLoggingFilter(httpAdapterHost));
 
   app.setGlobalPrefix('api');
   // Enable CORS for all origins

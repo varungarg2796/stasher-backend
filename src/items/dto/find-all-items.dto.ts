@@ -1,8 +1,8 @@
+/* eslint-disable prettier/prettier */
 import {
   IsOptional,
   IsString,
   IsIn,
-  IsBoolean,
   IsNumber,
   Min,
 } from 'class-validator';
@@ -22,9 +22,9 @@ export class FindAllItemsDto {
   tag?: string;
 
   @IsOptional()
-  @IsBoolean()
-  @Transform(({ value }) => value === 'true')
-  archived?: boolean = false; // Default to false
+  @IsString()
+  @IsIn(['true', 'false']) // Only allow these two string values
+  archived?: string;
 
   @IsOptional()
   @IsIn(['newest', 'oldest', 'name-asc', 'name-desc'])

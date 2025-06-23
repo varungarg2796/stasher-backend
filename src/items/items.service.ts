@@ -157,9 +157,8 @@ export class ItemsService {
     const skip = (page - 1) * limit;
     const where: Prisma.ItemWhereInput = {
       ownerId: userId,
-      archived: archived,
     };
-
+    where.archived = archived === 'true';
     if (search) {
       where.OR = [
         { name: { contains: search, mode: 'insensitive' } },
@@ -179,7 +178,6 @@ export class ItemsService {
     if (sort === 'oldest') orderBy = { createdAt: 'asc' };
     if (sort === 'name-asc') orderBy = { name: 'asc' };
     if (sort === 'name-desc') orderBy = { name: 'desc' };
-
     const [items, totalItems] = await this.prisma.$transaction([
       this.prisma.item.findMany({
         where,
@@ -269,5 +267,67 @@ export class ItemsService {
       }
       return { message: `${createdItems.length} items created successfully.` };
     });
+  }
+
+  async archive(id: string, userId: string, note?: string) {
+    await this.findOne(id, userId); // Ownership check
+    return this.prisma.item.update({
+      where: { id },
+      data: {
+        archived: true,
+        history: {
+          create: { action: 'archived', note: note || 'Item archived' },
+        },
+      },
+    });
+  }
+
+  async restore(id: string, userId: string, note?: string) {
+    await this.findOne(id, userId); // Ownership check
+    return this.prisma.item.update({
+      where: { id },
+      data: {
+        archived: false,
+        history: {
+          create: { action: 'restored', note: note || 'Item restored' },
+        },
+      },
+    });
+  }
+
+  async gift(id: string, userId: string, note?: string) {
+    const item = await this.findOne(id, userId, true); // Get raw item
+
+    if (item.quantity > 1) {
+      // Decrement quantity and add history
+      return this.prisma.item.update({
+        where: { id },
+        data: {
+          quantity: { decrement: 1 },
+          history: { create: { action: 'gifted', note } },
+        },
+      });
+    } else {
+      // Archive the last item
+      return this.archive(id, userId, note || 'Gifted (last one)');
+    }
+  }
+
+  async use(id: string, userId: string, note?: string) {
+    const item = await this.findOne(id, userId, true); // Get raw item
+
+    if (item.quantity > 1) {
+      // Decrement quantity
+      return this.prisma.item.update({
+        where: { id },
+        data: {
+          quantity: { decrement: 1 },
+          history: { create: { action: 'used', note } },
+        },
+      });
+    } else {
+      // Archive the last item
+      return this.archive(id, userId, note || 'Used (last one)');
+    }
   }
 }
