@@ -3,6 +3,7 @@ import { AppController } from './app.controller';
 import { AppService } from './app.service';
 import { UsersModule } from './users/users.module';
 import { ConfigModule } from '@nestjs/config';
+import { ScheduleModule } from '@nestjs/schedule';
 import { PrismaModule } from './prisma/prisma.module';
 import { AuthModule } from './auth/auth.module';
 import { ItemsModule } from './items/items.module';
@@ -13,6 +14,7 @@ import { UploadsModule } from './uploads/uploads.module';
 import { ShareModule } from './share/share.module';
 import { AiModule } from './ai/ai.module';
 import { StatsModule } from './stats/stats.module';
+import { TokenCleanupService } from './auth/token-cleanup.service';
 
 @Module({
   imports: [
@@ -20,6 +22,7 @@ import { StatsModule } from './stats/stats.module';
       isGlobal: true,
       envFilePath: '.env',
     }),
+    ScheduleModule.forRoot(),
     PrismaModule,
     AuthModule,
     UsersModule,
@@ -33,6 +36,6 @@ import { StatsModule } from './stats/stats.module';
     StatsModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [AppService, TokenCleanupService],
 })
 export class AppModule {}
