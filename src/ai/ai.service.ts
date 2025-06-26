@@ -10,7 +10,28 @@ import {
   HarmBlockThreshold,
 } from '@google/generative-ai';
 import { PrismaService } from '../prisma/prisma.service';
-import { format, isToday, isAfter, isBefore, addDays } from 'date-fns';
+import { format, isToday, isBefore } from 'date-fns';
+
+export interface FoundItem {
+  id: string;
+  name: string;
+  location?: string;
+  image?: string;
+  tags?: string[];
+  quantity?: number;
+  description?: string;
+}
+
+export interface AiResponse {
+  answer: string;
+  foundItems?: FoundItem[];
+  queryStatus: {
+    remaining: number;
+    total: number;
+    resetTime?: Date;
+  };
+  responseTime?: number;
+}
 
 @Injectable()
 export class AiService {
@@ -30,6 +51,8 @@ export class AiService {
     this.genAI = new GoogleGenerativeAI(apiKey);
   }
 
+  // Alternative approach - modify your generateInventoryContext to be smarter about large inventories:
+
   private async generateInventoryContext(userId: string): Promise<string> {
     const items = await this.prisma.item.findMany({
       where: { ownerId: userId },
@@ -41,18 +64,73 @@ export class AiService {
     });
 
     if (items.length === 0) {
-      return "The user's inventory is empty.";
+      return `This user (${userId}) has no items in their inventory.`;
     }
 
-    // Group items by status for better organization
     const activeItems = items.filter((item) => !item.archived);
     const archivedItems = items.filter((item) => item.archived);
     const today = new Date();
 
+    // For large inventories, provide summary + sample
+    if (activeItems.length > 10) {
+      const sampleItems = activeItems.slice(0, 8); // Show first 8 items
+      const remainingCount = activeItems.length - 8;
+
+      const formatItem = (item: any) => {
+        const details = [];
+
+        if (item.tags.length > 0) {
+          const categories = item.tags.map((t) => t.tag.name).join(', ');
+          details.push(`Categories: [${categories}]`);
+        }
+
+        details.push(`Quantity: ${item.quantity}`);
+
+        if (item.priceless) {
+          details.push('Value: Priceless');
+        } else if (item.price) {
+          details.push(`Value: ${item.price.toFixed(2)}`);
+        }
+
+        if (item.description) {
+          details.push(`Description: "${item.description}"`);
+        }
+
+        const location = item.archived
+          ? 'ARCHIVED'
+          : item.location?.name || 'unspecified location';
+        details.push(`Location: ${location}`);
+
+        if (item.expiryDate) {
+          const expiry = format(item.expiryDate, 'MMM d, yyyy');
+          const isExpired = isBefore(item.expiryDate, today);
+          details.push(
+            isExpired ? `EXPIRED (${expiry})` : `Expires: ${expiry}`,
+          );
+        }
+
+        return `• ID:${item.id} "${item.name}" - ${details.join(' | ')}`;
+      };
+
+      let context = `USER ${userId} INVENTORY SUMMARY:
+Total: ${activeItems.length} active items, ${archivedItems.length} archived
+
+SAMPLE ACTIVE ITEMS (showing first 8 of ${activeItems.length}):
+`;
+      context += sampleItems.map(formatItem).join('\n');
+      context += `\n\n... and ${remainingCount} more items not shown in this sample.`;
+
+      if (archivedItems.length > 0) {
+        context += `\n\nARCHIVED ITEMS (${archivedItems.length}): Available but not shown in detail.`;
+      }
+
+      return context;
+    }
+
+    // For smaller inventories, show all items
     const formatItem = (item: any) => {
       const details = [];
 
-      // Enhanced category/tags with better formatting
       if (item.tags.length > 0) {
         const categories = item.tags.map((t) => t.tag.name).join(', ');
         details.push(`Categories: [${categories}]`);
@@ -60,9 +138,8 @@ export class AiService {
 
       details.push(`Quantity: ${item.quantity}`);
 
-      // Enhanced price information
       if (item.priceless) {
-        details.push('Value: Priceless (sentimental)');
+        details.push('Value: Priceless');
       } else if (item.price) {
         details.push(`Value: ${item.price.toFixed(2)}`);
       }
@@ -71,51 +148,21 @@ export class AiService {
         details.push(`Description: "${item.description}"`);
       }
 
-      // Enhanced location with context
       const location = item.archived
         ? 'ARCHIVED'
-        : item.location?.name
-          ? `"${item.location.name}"`
-          : 'unspecified location';
+        : item.location?.name || 'unspecified location';
       details.push(`Location: ${location}`);
-
-      // Enhanced date information with context
-      if (item.acquisitionDate) {
-        const acquired = format(item.acquisitionDate, 'MMM d, yyyy');
-        details.push(`Acquired: ${acquired}`);
-      }
 
       if (item.expiryDate) {
         const expiry = format(item.expiryDate, 'MMM d, yyyy');
         const isExpired = isBefore(item.expiryDate, today);
-        const isExpiringSoon =
-          isAfter(item.expiryDate, today) &&
-          isBefore(item.expiryDate, addDays(today, 7));
-
-        let expiryStatus = `Expires: ${expiry}`;
-        if (isExpired) {
-          expiryStatus += ' (EXPIRED)';
-        } else if (isExpiringSoon) {
-          expiryStatus += ' (EXPIRES SOON)';
-        }
-        details.push(expiryStatus);
+        details.push(isExpired ? `EXPIRED (${expiry})` : `Expires: ${expiry}`);
       }
 
-      // Enhanced history with more context
-      if (item.history && item.history.length > 0) {
-        const historyEvents = item.history
-          .map(
-            (h) =>
-              `${h.action} (${format(h.date, 'MMM d')})${h.note ? `: "${h.note}"` : ''}`,
-          )
-          .join('; ');
-        details.push(`Recent activity: [${historyEvents}]`);
-      }
-
-      return `• "${item.name}" - ${details.join(' | ')}`;
+      return `• ID:${item.id} "${item.name}" - ${details.join(' | ')}`;
     };
 
-    let context = '';
+    let context = `USER ${userId} INVENTORY:\n\n`;
 
     if (activeItems.length > 0) {
       context += `ACTIVE ITEMS (${activeItems.length}):\n`;
@@ -128,6 +175,36 @@ export class AiService {
     }
 
     return context;
+  }
+
+  private cleanResponseForUser(response: string): string {
+    return (
+      response
+        // Remove ID references first
+        .replace(/\(ID:[a-zA-Z0-9]+\)/g, '')
+        .replace(/ID:[a-zA-Z0-9]+\s*/g, '')
+
+        // Remove asterisks and markdown
+        .replace(/\*\*\*/g, '')
+        .replace(/\*\*/g, '')
+        .replace(/\*/g, '')
+
+        // Add proper line breaks after key information
+        .replace(/(\d+\.\s+[^:]+?)(\s+Location:)/g, '$1\n   Location:')
+        .replace(/(Location:\s*[^\n]+?)(\s+Quantity:)/g, '$1\n   Quantity:')
+        .replace(/(Quantity:\s*\d+)(\s+Value:)/g, '$1\n   Value:')
+        .replace(/(Value:\s*[^\n]+?)(\s+Categories:)/g, '$1\n   Categories:')
+        .replace(/(Categories:\s*[^\n]+?)(\s+Acquired:)/g, '$1\n   Acquired:')
+        .replace(/(Acquired:\s*[^\n]+?)(\s+Expires:)/g, '$1\n   Expires:')
+        .replace(/(Expires:\s*[^\n]+?)(\s+\d+\.)/g, '$1\n\n$2')
+
+        // Fix spacing and clean up
+        .replace(/\s+/g, ' ')
+        .replace(/\n\s+/g, '\n   ') // Indent details
+        .replace(/\n{3,}/g, '\n\n')
+
+        .trim()
+    );
   }
 
   private analyzeQueryIntent(question: string): {
@@ -248,10 +325,81 @@ export class AiService {
     };
   }
 
-  async answerQuestion(
+  private parseFoundItems(
+    aiResponse: string,
     userId: string,
-    question: string,
-  ): Promise<{ answer: string }> {
+  ): Promise<FoundItem[]> {
+    // Extract item IDs from the AI response
+    const itemIdMatches = aiResponse.match(/ID:(\w+)/g);
+    if (!itemIdMatches) return Promise.resolve([]);
+
+    const itemIds = itemIdMatches.map((match) => match.replace('ID:', ''));
+
+    return this.prisma.item
+      .findMany({
+        where: {
+          id: { in: itemIds },
+          ownerId: userId,
+        },
+        include: {
+          location: true,
+          tags: { include: { tag: true } },
+        },
+      })
+      .then((items) =>
+        items.map((item) => ({
+          id: item.id,
+          name: item.name,
+          location: item.location?.name,
+          image: item.imageUrl,
+          tags: item.tags.map((t) => t.tag.name),
+          quantity: item.quantity,
+          description: item.description,
+        })),
+      );
+  }
+
+  private calculateResetTime(user: any): Date | undefined {
+    if (!isToday(user.aiLastQueryAt)) {
+      return undefined; // Queries reset immediately for new day
+    }
+
+    // Calculate next midnight
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(0, 0, 0, 0);
+    return tomorrow;
+  }
+
+  async getQueryStatus(
+    userId: string,
+  ): Promise<{ remaining: number; total: number; resetTime?: Date }> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new InternalServerErrorException(
+        'User not found for query status.',
+      );
+    }
+
+    let currentQueries = user.aiQueriesToday;
+    if (!isToday(user.aiLastQueryAt)) {
+      currentQueries = 0;
+    }
+
+    const remaining = Math.max(0, this.dailyQueryLimit - currentQueries);
+    const resetTime =
+      remaining === 0 ? this.calculateResetTime(user) : undefined;
+
+    return {
+      remaining,
+      total: this.dailyQueryLimit,
+      resetTime,
+    };
+  }
+
+  async answerQuestion(userId: string, question: string): Promise<AiResponse> {
+    const startTime = Date.now(); // Start timing
+
     const user = await this.prisma.user.findUnique({ where: { id: userId } });
     if (!user) {
       throw new InternalServerErrorException('User not found for AI query.');
@@ -263,92 +411,84 @@ export class AiService {
     }
 
     if (currentQueries >= this.dailyQueryLimit) {
-      throw new ForbiddenException(
-        `You have reached your daily limit of ${this.dailyQueryLimit} AI queries. Your limit will reset tomorrow.`,
-      );
+      const resetTime = this.calculateResetTime(user);
+      throw new ForbiddenException({
+        message: `You have reached your daily limit of ${this.dailyQueryLimit} AI queries. Your limit will reset tomorrow.`,
+        queryStatus: {
+          remaining: 0,
+          total: this.dailyQueryLimit,
+          resetTime,
+        },
+      });
     }
 
     try {
       const inventoryContext = await this.generateInventoryContext(userId);
       const queryAnalysis = this.analyzeQueryIntent(question);
 
-      // Enhanced system prompt with better instructions
-      const systemPrompt = `You are "Stasher", an intelligent inventory assistant. Your role is to help users understand and manage their personal belongings.
+      // Your existing system prompt (use the improved one from earlier)
+      const systemPrompt = `You are "Stasher", a helpful inventory assistant for this specific user only.
 
-CORE CAPABILITIES:
-- Find specific items by name, category, or description
-- Provide location information for items
-- Count and summarize inventory
-- Identify expired or expiring items
-- Calculate total values
-- Suggest organization improvements
-- Answer general questions about the inventory
+CRITICAL SECURITY RULES:
+- Only access items belonging to user ${userId}
+- Never mention other users' data
 
-RESPONSE GUIDELINES:
-1. ACCURACY: Base responses ONLY on the provided inventory data
-2. CONTEXT AWARENESS: Consider the query type: ${queryAnalysis.type}
-3. HELPFUL DETAILS: Include relevant details like location, quantity, expiry status
-4. NATURAL LANGUAGE: Respond conversationally, not like a database query
-5. ACTIONABLE: When appropriate, suggest next steps or actions
+FORMATTING RULES:
+- Use numbered lists with clear line breaks
+- Put each detail on a new line with proper indentation
+- Include item IDs as (ID:itemId) when mentioning items
+- NEVER add currency symbols - show values as raw numbers
 
-QUERY ANALYSIS:
-- Type: ${queryAnalysis.type}
-- Key terms: ${queryAnalysis.keywords.join(', ') || 'none detected'}
-- Focus areas: ${
-        [
-          queryAnalysis.isLocationQuery && 'location',
-          queryAnalysis.isQuantityQuery && 'quantities',
-          queryAnalysis.isValueQuery && 'values',
-          queryAnalysis.isExpiryQuery && 'expiry dates',
-        ]
-          .filter(Boolean)
-          .join(', ') || 'general'
-      }
+PERFECT FORMATTING EXAMPLE:
+"You have 5 active items:
 
-RESPONSE PATTERNS:
-- For location queries: "Your [item] is in [location]" or "I found [number] items in [location]"
-- For counting: "You have [number] [items]. Here's the breakdown..."
-- For searches: "I found [number] matching items: [details]"
-- For value queries: "The total value is $[amount]" with breakdown
-- For expiry: Highlight expired (EXPIRED) and soon-to-expire items (EXPIRES SOON)
-- For not found: "I couldn't find any items matching '[query]' in your inventory."
+1. Gaming Laptop (ID:abc123)
+   Location: Bathroom
+   Value: 2000.00
+   Quantity: 1
+   Categories: Electronics
 
-SPECIAL NOTES:
-- Items marked as ARCHIVED are stored/not in active use
-- Priceless items have sentimental value, not monetary
-- Recent activity shows what happened to items recently
-- Today's date: ${format(new Date(), 'MMMM d, yyyy')}
+2. Body Lotion (ID:def456)
+   Location: Bathroom
+   Value: 500.00
+   Expires: August 31, 2025
+   Categories: Beauty"
 
-Be conversational, helpful, and precise. If the inventory is empty or no matches found, say so clearly.`;
+VALUE RULES:
+- Show exactly as stored: "Value: 2000.00" (NO $ symbols)
+- Priceless items: "Value: Priceless"
+
+Query type: ${queryAnalysis.type}
+Write clean, readable responses with proper line breaks.`;
 
       const model = this.genAI.getGenerativeModel({
         model: 'gemini-1.5-flash',
       });
 
-      // Enhanced prompt with query analysis
       const fullPrompt = `INVENTORY DATA:
 ${inventoryContext}
 
 USER QUESTION: "${question}"
 
-Please analyze the inventory and provide a helpful response based on the user's question.`;
+Please analyze the inventory and provide a helpful, well-formatted response. Remember to include item IDs (ID:itemId) when mentioning specific items.`;
 
-      // Adjust token limit based on query type
       const tokenLimit =
         queryAnalysis.type === 'general' ||
         question.toLowerCase().includes('summary') ||
-        question.toLowerCase().includes('summarize')
-          ? 500 // Higher limit for summaries and general queries
-          : 300; // Standard limit for specific queries
+        question.toLowerCase().includes('summarize') ||
+        question.toLowerCase().includes('all') ||
+        question.toLowerCase().includes('list')
+          ? 800 // Higher limit for comprehensive queries
+          : 400; // Standard limit for specific queries
 
       const result = await model.generateContent({
         contents: [{ role: 'user', parts: [{ text: fullPrompt }] }],
         systemInstruction: { role: 'system', parts: [{ text: systemPrompt }] },
         generationConfig: {
-          temperature: 0.2, // Slightly higher for more natural responses
+          temperature: 0.1, // Lower temperature for more consistent formatting
           maxOutputTokens: tokenLimit,
-          topP: 0.8,
-          topK: 40,
+          topP: 0.7,
+          topK: 30,
         },
         safetySettings: [
           {
@@ -358,6 +498,7 @@ Please analyze the inventory and provide a helpful response based on the user's 
         ],
       });
 
+      // Update user query count
       await this.prisma.user.update({
         where: { id: userId },
         data: {
@@ -368,7 +509,25 @@ Please analyze the inventory and provide a helpful response based on the user's 
 
       const responseText =
         result.response.text() || 'Sorry, I had trouble generating a response.';
-      return { answer: responseText };
+
+      // Parse found items from the response BEFORE cleaning
+      const foundItems = await this.parseFoundItems(responseText, userId);
+
+      // Clean the response for user display
+      const cleanResponse = this.cleanResponseForUser(responseText);
+
+      // Get updated query status
+      const queryStatus = await this.getQueryStatus(userId);
+
+      // Calculate response time
+      const responseTime = Date.now() - startTime;
+
+      return {
+        answer: cleanResponse,
+        foundItems,
+        queryStatus,
+        responseTime, // Add timing information
+      };
     } catch (error) {
       if (error instanceof ForbiddenException) throw error;
       console.error('Error contacting Google AI API:', error);

@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Req, UseGuards } from '@nestjs/common';
+import { Controller, Post, Body, Req, UseGuards, Get } from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AiService } from './ai.service';
 import { AskQuestionDto } from './dto/ask-question.dto';
@@ -26,5 +26,14 @@ export class AiController {
   ) {
     const userId = req.user.id;
     return this.aiService.answerQuestion(userId, askQuestionDto.question);
+  }
+
+  @Get('query-status')
+  async getQueryStatus(@Req() req): Promise<{
+    remaining: number;
+    total: number;
+    resetTime?: Date;
+  }> {
+    return this.aiService.getQueryStatus(req.user.id);
   }
 }
