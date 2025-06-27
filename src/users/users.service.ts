@@ -198,4 +198,13 @@ export class UsersService {
     // --- 5. Return the fully updated user profile ---
     return this.findByIdWithUsage(userId);
   }
+
+  async checkUsernameAvailability(
+    username: string,
+  ): Promise<{ available: boolean }> {
+    const existingUser = await this.prisma.user.findUnique({
+      where: { username },
+    });
+    return { available: !existingUser };
+  }
 }

@@ -1,4 +1,12 @@
-import { Controller, Get, Req, UseGuards, Patch, Body } from '@nestjs/common';
+import {
+  Controller,
+  Get,
+  Req,
+  UseGuards,
+  Patch,
+  Body,
+  Param,
+} from '@nestjs/common';
 import { UsersService } from './users.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { Request } from 'express';
@@ -34,5 +42,10 @@ export class UsersController {
       req.user.id,
       updatePreferencesDto,
     );
+  }
+
+  @Get('check-username/:username')
+  async checkUsernameAvailability(@Param('username') username: string) {
+    return this.usersService.checkUsernameAvailability(username);
   }
 }
