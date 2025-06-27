@@ -30,6 +30,9 @@ model User {
   aiQueriesToday Int      @default(0)
   aiLastQueryAt  DateTime @default(now())
 
+  aiAnalysesToday   Int      @default(0)
+  aiAnalysisLastAt  DateTime @default(now())
+
   // Relations
   items         Item[]
   collections   Collection[]

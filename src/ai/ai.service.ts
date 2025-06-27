@@ -33,10 +33,16 @@ export interface AiResponse {
   responseTime?: number;
 }
 
+export interface ImageAnalysisResponse {
+  name: string;
+  tags: string[];
+}
+
 @Injectable()
 export class AiService {
   private readonly genAI: GoogleGenerativeAI;
   private readonly dailyQueryLimit = 10;
+  private readonly dailyAnalysisLimit = 5; // The new, separate limit
 
   constructor(
     private readonly configService: ConfigService,
@@ -205,6 +211,22 @@ SAMPLE ACTIVE ITEMS (showing first 8 of ${activeItems.length}):
 
         .trim()
     );
+  }
+
+  private cleanJsonResponse(response: string): string {
+    // Remove markdown code block markers
+    let cleaned = response.replace(/```json\s*/g, '').replace(/```\s*/g, '');
+
+    // Remove any leading/trailing whitespace
+    cleaned = cleaned.trim();
+
+    // Extract JSON object if there's extra text
+    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (jsonMatch) {
+      cleaned = jsonMatch[0];
+    }
+
+    return cleaned;
   }
 
   private analyzeQueryIntent(question: string): {
@@ -397,6 +419,32 @@ SAMPLE ACTIVE ITEMS (showing first 8 of ${activeItems.length}):
     };
   }
 
+  async getAnalysisStatus(
+    userId: string,
+  ): Promise<{ remaining: number; total: number; resetTime?: Date }> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new InternalServerErrorException(
+        'User not found for analysis status.',
+      );
+    }
+
+    let currentAnalyses = user.aiAnalysesToday;
+    if (!isToday(user.aiAnalysisLastAt)) {
+      currentAnalyses = 0;
+    }
+
+    const remaining = Math.max(0, this.dailyAnalysisLimit - currentAnalyses);
+    const resetTime =
+      remaining === 0 ? this.calculateResetTime(user) : undefined;
+
+    return {
+      remaining,
+      total: this.dailyAnalysisLimit,
+      resetTime,
+    };
+  }
+
   async answerQuestion(userId: string, question: string): Promise<AiResponse> {
     const startTime = Date.now(); // Start timing
 
@@ -534,6 +582,88 @@ Please analyze the inventory and provide a helpful, well-formatted response. Rem
       throw new InternalServerErrorException(
         'Failed to get a response from the AI assistant.',
       );
+    }
+  }
+
+  async analyzeImage(
+    userId: string,
+    imageData: string,
+    mimeType: string,
+  ): Promise<ImageAnalysisResponse> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new InternalServerErrorException('User not found for AI analysis.');
+    }
+
+    let currentAnalyses = user.aiAnalysesToday;
+    if (!isToday(user.aiAnalysisLastAt)) {
+      currentAnalyses = 0;
+    }
+
+    if (currentAnalyses >= this.dailyAnalysisLimit) {
+      const resetTime = this.calculateResetTime(user);
+      throw new ForbiddenException({
+        message: `You have reached your daily limit of ${this.dailyAnalysisLimit} AI image analyses. Your limit will reset tomorrow.`,
+        analysisStatus: {
+          remaining: 0,
+          total: this.dailyAnalysisLimit,
+          resetTime,
+        },
+      });
+    }
+
+    try {
+      // 1. Fetch the user's available tags to provide as context
+      const userTags = await this.prisma.tag.findMany({
+        where: { userId },
+        select: { name: true },
+      });
+      const availableTags = userTags.map((t) => t.name).join(', ');
+
+      // 2. Construct the prompt for Gemini
+      const model = this.genAI.getGenerativeModel({
+        model: 'gemini-1.5-flash',
+      });
+      const prompt = `Analyze the attached image of an object and perform the following tasks:
+1.  Suggest a concise and accurate "Item Name" for this object. The name should be 3-5 words at most.
+2.  From the following list of available categories, select up to 3 that best describe the item in the image. Available Categories: [${availableTags}].
+3.  Return your response ONLY as a valid JSON object with the following structure: { "name": "Suggested Item Name", "tags": ["tag1", "tag2"] }. Do not include any other text or explanations.`;
+
+      // 3. Define the image part for the multimodal prompt
+      const imagePart = {
+        inlineData: {
+          data: imageData,
+          mimeType,
+        },
+      };
+
+      // 4. Send the request to Gemini
+      const result = await model.generateContent([prompt, imagePart]);
+      const responseText = result.response.text();
+
+      // 5. Clean and parse the JSON response from the AI
+      const cleanedResponse = this.cleanJsonResponse(responseText);
+      const parsedResponse = JSON.parse(cleanedResponse);
+
+      // 6. Basic validation of the AI's response
+      if (!parsedResponse.name || !Array.isArray(parsedResponse.tags)) {
+        throw new Error('AI returned an invalid JSON structure.');
+      }
+
+      // Update user analysis count
+      await this.prisma.user.update({
+        where: { id: userId },
+        data: {
+          aiAnalysesToday: currentAnalyses + 1,
+          aiAnalysisLastAt: new Date(),
+        },
+      });
+
+      return parsedResponse;
+    } catch (error) {
+      if (error instanceof ForbiddenException) throw error;
+      console.error('Error analyzing image with Gemini:', error);
+      throw new InternalServerErrorException('Failed to analyze the image.');
     }
   }
 }
