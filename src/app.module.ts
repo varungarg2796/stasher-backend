@@ -14,6 +14,7 @@ import { UploadsModule } from './uploads/uploads.module';
 import { ShareModule } from './share/share.module';
 import { AiModule } from './ai/ai.module';
 import { StatsModule } from './stats/stats.module';
+import { HealthModule } from './health/health.module';
 import { TokenCleanupService } from './auth/token-cleanup.service';
 
 @Module({
@@ -34,6 +35,7 @@ import { TokenCleanupService } from './auth/token-cleanup.service';
     ShareModule,
     AiModule,
     StatsModule,
+    HealthModule,
   ],
   controllers: [AppController],
   providers: [AppService, TokenCleanupService],

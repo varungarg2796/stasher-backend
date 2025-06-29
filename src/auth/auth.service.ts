@@ -103,9 +103,6 @@ export class AuthService {
         expiresIn: refreshExpiration,
       }),
     ]);
-    console.log(
-      `Generated tokens for user ${payload.sub}: Access Token (expires in ${accessExpiration}), Refresh Token (expires in ${refreshExpiration})`,
-    );
     try {
       const refreshTokenHash = await this.hashToken(refreshToken);
       const expiryDate = this.calculateExpiryDate(refreshExpiration);
@@ -176,14 +173,8 @@ export class AuthService {
       if (!payload || !payload.sub) {
         throw new UnauthorizedException('Invalid refresh token payload');
       }
-      console.log(
-        `Refresh Step 1 Passed: JWT verified for user ${payload.sub}`,
-      );
 
       // 2. Validate against Database using bcrypt.compare
-      console.log(
-        `Refresh Step 2: Finding potential DB tokens for user ${payload.sub}`,
-      );
       const potentialDbTokens = await this.prisma.refreshToken.findMany({
         where: {
           userId: payload.sub,
@@ -200,10 +191,6 @@ export class AuthService {
         // await this.prisma.refreshToken.updateMany({ where: { userId: payload.sub, isRevoked: false }, data: { isRevoked: true } });
         throw new ForbiddenException('No valid session found.'); // Changed to Forbidden
       }
-
-      console.log(
-        `Refresh Step 2: Comparing hash for ${potentialDbTokens.length} token(s).`,
-      );
       let validStoredToken: PrismaRefreshToken | null = null;
       for (const storedToken of potentialDbTokens) {
         const isMatch = await bcrypt.compare(
@@ -212,9 +199,6 @@ export class AuthService {
         );
         if (isMatch) {
           validStoredToken = storedToken;
-          console.log(
-            `Refresh Step 2: Hash match success! DB Token ID: ${validStoredToken.id}`,
-          );
           break; // Exit loop once match is found
         }
       }
@@ -277,22 +261,16 @@ export class AuthService {
     try {
       // --- Prioritize revoking ALL by User ID ---
       if (userId) {
-        console.log(
-          `Attempting to revoke all refresh tokens for user ${userId}`,
-        );
-        const result = await this.prisma.refreshToken.updateMany({
+        await this.prisma.refreshToken.updateMany({
           where: {
             userId: userId,
-            isRevoked: false, // Only target active tokens
+            isRevoked: false,
           },
           data: {
             isRevoked: true,
             updatedAt: new Date(),
           },
         });
-        console.log(
-          `Revoked ${result.count} refresh token(s) for user ${userId}.`,
-        );
         // If count is 0, it means no active tokens were found, which is fine.
 
         // --- Fallback: Try to revoke by specific token hash IF userId wasn't available AND refreshToken was ---
@@ -316,7 +294,7 @@ export class AuthService {
           });
           if (result.count > 0) {
             console.log(
-              `Revoked ${result.count} token(s) matching hash ...${tokenHash.slice(-6)}`,
+              `Successfully revoked ${result.count} refresh token(s) matching provided hash.`,
             );
           } else {
             console.log(

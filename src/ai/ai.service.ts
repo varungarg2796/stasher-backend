@@ -22,9 +22,18 @@ export interface FoundItem {
   description?: string;
 }
 
+export interface FoundCollection {
+  id: string;
+  name: string;
+  description?: string;
+  itemCount: number;
+  coverImage?: string;
+}
+
 export interface AiResponse {
   answer: string;
   foundItems?: FoundItem[];
+  foundCollections?: FoundCollection[];
   queryStatus: {
     remaining: number;
     total: number;
@@ -55,6 +64,57 @@ export class AiService {
       );
     }
     this.genAI = new GoogleGenerativeAI(apiKey);
+  }
+
+  private async generateCollectionContext(userId: string): Promise<string> {
+    const collections = await this.prisma.collection.findMany({
+      where: { ownerId: userId },
+      include: {
+        items: {
+          include: {
+            item: {
+              include: {
+                location: true,
+                tags: { include: { tag: true } },
+              },
+            },
+          },
+        },
+        _count: { select: { items: true } },
+      },
+    });
+
+    if (collections.length === 0) {
+      return `This user has no collections.`;
+    }
+
+    let context = `USER ${userId} COLLECTIONS:\n\n`;
+
+    collections.forEach((collection) => {
+      const details = [];
+      details.push(`Items: ${collection._count.items}`);
+
+      if (collection.description) {
+        details.push(`Description: "${collection.description}"`);
+      }
+
+      context += `• COLLECTION_ID:${collection.id} "${collection.name}" - ${details.join(' | ')}\n`;
+
+      if (collection.items.length > 0) {
+        context += `  Contains: `;
+        const itemNames = collection.items
+          .slice(0, 3)
+          .map((ci) => ci.item.name);
+        context += itemNames.join(', ');
+        if (collection.items.length > 3) {
+          context += ` and ${collection.items.length - 3} more items`;
+        }
+        context += `\n`;
+      }
+      context += `\n`;
+    });
+
+    return context;
   }
 
   // Alternative approach - modify your generateInventoryContext to be smarter about large inventories:
@@ -186,14 +246,23 @@ SAMPLE ACTIVE ITEMS (showing first 8 of ${activeItems.length}):
   private cleanResponseForUser(response: string): string {
     return (
       response
-        // Remove ID references first
+        // Remove ID references with parentheses completely
         .replace(/\(ID:[a-zA-Z0-9]+\)/g, '')
-        .replace(/ID:[a-zA-Z0-9]+\s*/g, '')
+        .replace(/\(COLLECTION_ID:[a-zA-Z0-9]+\)/g, '')
+
+        // Remove standalone ID references
+        .replace(/ID:[a-zA-Z0-9]+,?\s*/g, '')
+        .replace(/COLLECTION_ID:[a-zA-Z0-9]+,?\s*/g, '')
 
         // Remove asterisks and markdown
         .replace(/\*\*\*/g, '')
         .replace(/\*\*/g, '')
         .replace(/\*/g, '')
+
+        // Clean up multiple commas and spaces left from ID removal
+        .replace(/,\s*,/g, ',')
+        .replace(/,\s*and/g, ' and')
+        .replace(/:\s*,/g, ':')
 
         // Add proper line breaks after key information
         .replace(/(\d+\.\s+[^:]+?)(\s+Location:)/g, '$1\n   Location:')
@@ -237,12 +306,14 @@ SAMPLE ACTIVE ITEMS (showing first 8 of ${activeItems.length}):
       | 'location'
       | 'value'
       | 'organization'
+      | 'collection'
       | 'general';
     keywords: string[];
     isLocationQuery: boolean;
     isQuantityQuery: boolean;
     isValueQuery: boolean;
     isExpiryQuery: boolean;
+    isCollectionQuery: boolean;
   } {
     const lowerQuestion = question.toLowerCase();
 
@@ -254,9 +325,20 @@ SAMPLE ACTIVE ITEMS (showing first 8 of ${activeItems.length}):
       | 'location'
       | 'value'
       | 'organization'
+      | 'collection'
       | 'general' = 'general';
 
-    if (lowerQuestion.includes('where') || lowerQuestion.includes('location')) {
+    if (
+      lowerQuestion.includes('collection') ||
+      lowerQuestion.includes('collections') ||
+      lowerQuestion.includes('group') ||
+      lowerQuestion.includes('category')
+    ) {
+      type = 'collection';
+    } else if (
+      lowerQuestion.includes('where') ||
+      lowerQuestion.includes('location')
+    ) {
       type = 'location';
     } else if (
       lowerQuestion.includes('how many') ||
@@ -344,6 +426,7 @@ SAMPLE ACTIVE ITEMS (showing first 8 of ${activeItems.length}):
       isQuantityQuery: type === 'count',
       isValueQuery: type === 'value',
       isExpiryQuery: lowerQuestion.includes('expir'),
+      isCollectionQuery: type === 'collection',
     };
   }
 
@@ -377,6 +460,39 @@ SAMPLE ACTIVE ITEMS (showing first 8 of ${activeItems.length}):
           tags: item.tags.map((t) => t.tag.name),
           quantity: item.quantity,
           description: item.description,
+        })),
+      );
+  }
+
+  private parseFoundCollections(
+    aiResponse: string,
+    userId: string,
+  ): Promise<FoundCollection[]> {
+    // Extract collection IDs from the AI response
+    const collectionIdMatches = aiResponse.match(/COLLECTION_ID:(\w+)/g);
+    if (!collectionIdMatches) return Promise.resolve([]);
+
+    const collectionIds = collectionIdMatches.map((match) =>
+      match.replace('COLLECTION_ID:', ''),
+    );
+
+    return this.prisma.collection
+      .findMany({
+        where: {
+          id: { in: collectionIds },
+          ownerId: userId,
+        },
+        include: {
+          _count: { select: { items: true } },
+        },
+      })
+      .then((collections) =>
+        collections.map((collection) => ({
+          id: collection.id,
+          name: collection.name,
+          description: collection.description,
+          itemCount: collection._count.items,
+          coverImage: collection.coverImage,
         })),
       );
   }
@@ -472,6 +588,7 @@ SAMPLE ACTIVE ITEMS (showing first 8 of ${activeItems.length}):
 
     try {
       const inventoryContext = await this.generateInventoryContext(userId);
+      const collectionContext = await this.generateCollectionContext(userId);
       const queryAnalysis = this.analyzeQueryIntent(question);
 
       // Your existing system prompt (use the improved one from earlier)
@@ -485,11 +602,13 @@ FORMATTING RULES:
 - Use numbered lists with clear line breaks
 - Put each detail on a new line with proper indentation
 - Include item IDs as (ID:itemId) when mentioning items
+- Include collection IDs as (COLLECTION_ID:collectionId) when mentioning collections
 - NEVER add currency symbols - show values as raw numbers
 
 PERFECT FORMATTING EXAMPLE:
-"You have 5 active items:
+"You have 5 active items and 2 collections:
 
+Items:
 1. Gaming Laptop (ID:abc123)
    Location: Bathroom
    Value: 2000.00
@@ -500,11 +619,22 @@ PERFECT FORMATTING EXAMPLE:
    Location: Bathroom
    Value: 500.00
    Expires: August 31, 2025
-   Categories: Beauty"
+   Categories: Beauty
+
+Collections:
+1. Gaming Setup (COLLECTION_ID:col123) - 3 items
+   Description: My complete gaming collection
+
+2. Skincare Items (COLLECTION_ID:col456) - 7 items"
 
 VALUE RULES:
 - Show exactly as stored: "Value: 2000.00" (NO $ symbols)
 - Priceless items: "Value: Priceless"
+
+COLLECTION RULES:
+- Always include COLLECTION_ID when mentioning collections
+- Show item count for collections
+- Include description if available
 
 Query type: ${queryAnalysis.type}
 Write clean, readable responses with proper line breaks.`;
@@ -516,9 +646,11 @@ Write clean, readable responses with proper line breaks.`;
       const fullPrompt = `INVENTORY DATA:
 ${inventoryContext}
 
+${collectionContext}
+
 USER QUESTION: "${question}"
 
-Please analyze the inventory and provide a helpful, well-formatted response. Remember to include item IDs (ID:itemId) when mentioning specific items.`;
+Please analyze the inventory and collections and provide a helpful, well-formatted response. Remember to include item IDs (ID:itemId) when mentioning specific items and collection IDs (COLLECTION_ID:collectionId) when mentioning specific collections.`;
 
       const tokenLimit =
         queryAnalysis.type === 'general' ||
@@ -558,8 +690,12 @@ Please analyze the inventory and provide a helpful, well-formatted response. Rem
       const responseText =
         result.response.text() || 'Sorry, I had trouble generating a response.';
 
-      // Parse found items from the response BEFORE cleaning
+      // Parse found items and collections from the response BEFORE cleaning
       const foundItems = await this.parseFoundItems(responseText, userId);
+      const foundCollections = await this.parseFoundCollections(
+        responseText,
+        userId,
+      );
 
       // Clean the response for user display
       const cleanResponse = this.cleanResponseForUser(responseText);
@@ -573,6 +709,7 @@ Please analyze the inventory and provide a helpful, well-formatted response. Rem
       return {
         answer: cleanResponse,
         foundItems,
+        foundCollections,
         queryStatus,
         responseTime, // Add timing information
       };
