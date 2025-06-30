@@ -870,10 +870,23 @@ Please analyze the inventory and collections and provide a helpful, well-formatt
 
       // 5. Clean and parse the JSON response from the AI
       const cleanedResponse = this.cleanJsonResponse(responseText);
-      const parsedResponse = JSON.parse(cleanedResponse);
+
+      let parsedResponse;
+      try {
+        parsedResponse = JSON.parse(cleanedResponse);
+
+        // Handle case where cleanJsonResponse wrapped single object in array
+        if (Array.isArray(parsedResponse) && parsedResponse.length === 1) {
+          parsedResponse = parsedResponse[0];
+        }
+      } catch (parseError) {
+        console.error(`🖼️ [Image Analysis] JSON parse failed:`, parseError);
+        throw new Error('AI returned an invalid JSON structure.');
+      }
 
       // 6. Basic validation of the AI's response
       if (!parsedResponse.name || !Array.isArray(parsedResponse.tags)) {
+        console.error(`🖼️ [Image Analysis] Validation failed:`, parsedResponse);
         throw new Error('AI returned an invalid JSON structure.');
       }
 
@@ -1132,10 +1145,6 @@ Please analyze the inventory and collections and provide a helpful, well-formatt
     existingCollections: any[],
   ): Promise<CollectionSuggestion[]> {
     const startTime = Date.now();
-    console.log(
-      `🤖 [Gemini] Starting collection suggestions analysis for ${items.length} items, ${existingCollections.length} existing collections`,
-    );
-
     try {
       const itemsForGemini = items.slice(0, 15).map((item) => ({
         name: item.name,
@@ -1153,10 +1162,6 @@ Please analyze the inventory and collections and provide a helpful, well-formatt
         (item) => !item.isCollected,
       );
       const collectedItems = itemsForGemini.filter((item) => item.isCollected);
-
-      console.log(
-        `🤖 [Gemini] Context: ${uncollectedItems.length} uncollected, ${collectedItems.length} collected items`,
-      );
 
       const prompt = `CONTEXT: Smart Collection Suggestions for User
 
@@ -1219,10 +1224,6 @@ If remaining items are too few or don't form meaningful new patterns, return few
 
 Return JSON: [{"name": "Collection Name", "description": "Brief description of why this collection is useful", "itemNames": ["item1", "item2", "item3"]}]`;
 
-      console.log(
-        `🤖 [Gemini] Calling API with prompt length: ${prompt.length} characters`,
-      );
-
       const model = this.genAI.getGenerativeModel({
         model: 'gemini-1.5-flash',
       });
@@ -1236,21 +1237,8 @@ Return JSON: [{"name": "Collection Name", "description": "Brief description of w
       });
 
       const responseText = result.response.text();
-      const responseTime = Date.now() - startTime;
-
-      console.log(`🤖 [Gemini] API call completed in ${responseTime}ms`);
-      console.log(
-        `🤖 [Gemini] Raw response length: ${responseText.length} characters`,
-      );
-
       const cleanedResponse = this.cleanJsonResponse(responseText);
-      console.log(`🤖 [Gemini] Cleaned response: ${cleanedResponse}`);
-
       const geminiSuggestions = JSON.parse(cleanedResponse);
-      console.log(
-        `🤖 [Gemini] Parsed ${geminiSuggestions.length} suggestions from AI`,
-      );
-
       const finalSuggestions = geminiSuggestions
         .map((suggestion: any) => {
           const matchingItems = items.filter((item) =>
@@ -1269,17 +1257,6 @@ Return JSON: [{"name": "Collection Name", "description": "Brief description of w
           return this.addCollectionAwareness(matchingItems, baseSuggestion);
         })
         .filter((s: CollectionSuggestion) => s.itemIds.length >= 3);
-
-      const totalTime = Date.now() - startTime;
-      console.log(
-        `🤖 [Gemini] SUCCESS: Generated ${finalSuggestions.length} valid suggestions in ${totalTime}ms`,
-      );
-
-      if (finalSuggestions.length > 0) {
-        console.log(
-          `🤖 [Gemini] Suggestions: ${finalSuggestions.map((s) => `"${s.name}" (${s.itemIds.length} items)`).join(', ')}`,
-        );
-      }
 
       return finalSuggestions;
     } catch (error) {
@@ -1340,13 +1317,6 @@ Return JSON: [{"name": "Collection Name", "description": "Brief description of w
       (item) => item.collections.length === 0,
     );
 
-    console.log(
-      `📊 [AI Service] Starting suggestion generation for user ${userId}`,
-    );
-    console.log(
-      `📊 [AI Service] Items: ${allItems.length} total, ${uncollectedItems.length} uncollected`,
-    );
-
     if (allItems.length < 3) {
       console.log(
         `⏹️ [AI Service] Insufficient items (${allItems.length} < 3), returning empty suggestions`,
@@ -1377,12 +1347,7 @@ Return JSON: [{"name": "Collection Name", "description": "Brief description of w
         })),
       );
 
-    console.log(
-      `📊 [AI Service] Found ${existingCollections.length} existing collections: ${existingCollections.map((c) => c.name).join(', ')}`,
-    );
-
     // Generate suggestions using ALL items
-    console.log(`🔄 [AI Service] Generating rule-based suggestions...`);
     const locationSuggestions = this.groupByLocation(
       allItems,
       existingCollections,
@@ -1393,10 +1358,6 @@ Return JSON: [{"name": "Collection Name", "description": "Brief description of w
       existingCollections,
     );
 
-    console.log(
-      `🔄 [AI Service] Rule-based results: ${locationSuggestions.length} location, ${priceSuggestions.length} price, ${patternSuggestions.length} pattern`,
-    );
-
     let allSuggestions = [
       ...locationSuggestions,
       ...priceSuggestions,
@@ -1405,15 +1366,9 @@ Return JSON: [{"name": "Collection Name", "description": "Brief description of w
 
     // Add Gemini suggestions for users with 3+ items
     if (allItems.length >= 3) {
-      console.log(
-        `✅ [AI Service] Triggering Gemini analysis (${allItems.length} items >= 3 threshold)`,
-      );
       const geminiSuggestions = await this.getGeminiSuggestions(
         allItems,
         existingCollections,
-      );
-      console.log(
-        `✅ [AI Service] Gemini returned ${geminiSuggestions.length} suggestions`,
       );
       allSuggestions = [...allSuggestions, ...geminiSuggestions];
     } else {
@@ -1429,13 +1384,6 @@ Return JSON: [{"name": "Collection Name", "description": "Brief description of w
     );
 
     const rankedSuggestions = this.rankSuggestions(smartFilteredSuggestions);
-
-    console.log(
-      `🎯 [AI Service] Final results: ${rankedSuggestions.length} suggestions after ranking and filtering`,
-    );
-    console.log(
-      `🎯 [AI Service] Returning ${Math.min(rankedSuggestions.length, limit)} suggestions (limit: ${limit})`,
-    );
 
     // Update user query count
     await this.prisma.user.update({
