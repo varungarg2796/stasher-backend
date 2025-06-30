@@ -47,6 +47,26 @@ export interface ImageAnalysisResponse {
   tags: string[];
 }
 
+export interface CollectionSuggestion {
+  name: string;
+  description: string;
+  itemIds: string[];
+  itemNames: string[];
+  suggestedBy: 'location' | 'price' | 'gemini' | 'pattern';
+  confidence: number;
+  suggestionId: string; // Unique identifier for tracking dismissals
+  itemsAlreadyInCollections?: Array<{
+    itemId: string;
+    itemName: string;
+    existingCollections: Array<{ id: string; name: string }>;
+  }>;
+}
+
+export interface CollectionSuggestionsResponse {
+  suggestions: CollectionSuggestion[];
+  totalUncollectedItems: number;
+}
+
 @Injectable()
 export class AiService {
   private readonly genAI: GoogleGenerativeAI;
@@ -64,6 +84,52 @@ export class AiService {
       );
     }
     this.genAI = new GoogleGenerativeAI(apiKey);
+  }
+
+  private generateSuggestionId(
+    name: string,
+    itemIds: string[],
+    suggestedBy: string,
+  ): string {
+    const content = `${name}-${itemIds.sort().join(',')}-${suggestedBy}`;
+    // Simple hash alternative - good enough for suggestion IDs
+    let hash = 0;
+    for (let i = 0; i < content.length; i++) {
+      const char = content.charCodeAt(i);
+      hash = (hash << 5) - hash + char;
+      hash = hash & hash; // Convert to 32-bit integer
+    }
+    return Math.abs(hash).toString(36).substring(0, 8);
+  }
+
+  private shouldSuppressSuggestion(
+    suggestion: CollectionSuggestion,
+    existingCollections: any[],
+  ): boolean {
+    // Suppress if >80% of items are already in similar collections
+    if (!suggestion.itemsAlreadyInCollections) return false;
+
+    const alreadyCollectedCount = suggestion.itemsAlreadyInCollections.length;
+    const totalItems = suggestion.itemIds.length;
+    const collectionPercentage = alreadyCollectedCount / totalItems;
+
+    // Check if a very similar collection already exists
+    const similarCollectionExists = existingCollections.some((collection) => {
+      const similarity = this.calculateCollectionSimilarity(
+        suggestion.name,
+        collection.name,
+      );
+      return similarity > 0.7; // 70% similarity threshold
+    });
+
+    return collectionPercentage > 0.8 || similarCollectionExists;
+  }
+
+  private calculateCollectionSimilarity(name1: string, name2: string): number {
+    const words1 = name1.toLowerCase().split(' ');
+    const words2 = name2.toLowerCase().split(' ');
+    const commonWords = words1.filter((word) => words2.includes(word));
+    return commonWords.length / Math.max(words1.length, words2.length);
   }
 
   private async generateCollectionContext(userId: string): Promise<string> {
@@ -289,12 +355,36 @@ SAMPLE ACTIVE ITEMS (showing first 8 of ${activeItems.length}):
     // Remove any leading/trailing whitespace
     cleaned = cleaned.trim();
 
-    // Extract JSON object if there's extra text
-    const jsonMatch = cleaned.match(/\{[\s\S]*\}/);
-    if (jsonMatch) {
-      cleaned = jsonMatch[0];
+    // Handle common Gemini response patterns
+    // Pattern 1: Array format [{"name": ...}, {"name": ...}]
+    const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
+    if (arrayMatch) {
+      return arrayMatch[0];
     }
 
+    // Pattern 2: Multiple objects separated by commas: {"name": ...}, {"name": ...}
+    // Convert to proper array format
+    if (cleaned.includes('"},') && !cleaned.startsWith('[')) {
+      // Split by "},\s*{" to find object boundaries
+      const objectParts = cleaned.split(/\},\s*\{/);
+      if (objectParts.length > 1) {
+        // Reconstruct as proper array
+        const fixedObjects = objectParts.map((part, index) => {
+          if (index === 0) return part + '}'; // First object
+          if (index === objectParts.length - 1) return '{' + part; // Last object
+          return '{' + part + '}'; // Middle objects
+        });
+        return '[' + fixedObjects.join(', ') + ']';
+      }
+    }
+
+    // Pattern 3: Single object {"name": ...}
+    const objectMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (objectMatch) {
+      return '[' + objectMatch[0] + ']'; // Wrap single object in array
+    }
+
+    // Fallback: return as is
     return cleaned;
   }
 
@@ -802,5 +892,569 @@ Please analyze the inventory and collections and provide a helpful, well-formatt
       console.error('Error analyzing image with Gemini:', error);
       throw new InternalServerErrorException('Failed to analyze the image.');
     }
+  }
+
+  private async getAllUserItems(userId: string) {
+    return this.prisma.item.findMany({
+      where: {
+        ownerId: userId,
+        archived: false,
+      },
+      include: {
+        location: true,
+        tags: { include: { tag: true } },
+        collections: {
+          include: {
+            collection: {
+              select: { id: true, name: true },
+            },
+          },
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  }
+
+  private addCollectionAwareness(
+    items: any[],
+    suggestion: Omit<
+      CollectionSuggestion,
+      'itemsAlreadyInCollections' | 'suggestionId'
+    >,
+  ): CollectionSuggestion {
+    const itemsAlreadyInCollections = items
+      .filter((item) => item.collections && item.collections.length > 0)
+      .map((item) => ({
+        itemId: item.id,
+        itemName: item.name,
+        existingCollections: item.collections.map((ci: any) => ({
+          id: ci.collection.id,
+          name: ci.collection.name,
+        })),
+      }));
+
+    const suggestionId = this.generateSuggestionId(
+      suggestion.name,
+      suggestion.itemIds,
+      suggestion.suggestedBy,
+    );
+
+    return {
+      ...suggestion,
+      suggestionId,
+      itemsAlreadyInCollections:
+        itemsAlreadyInCollections.length > 0
+          ? itemsAlreadyInCollections
+          : undefined,
+    };
+  }
+
+  private groupByLocation(
+    items: any[],
+    existingCollections: any[] = [],
+  ): CollectionSuggestion[] {
+    const locationGroups = new Map<string, any[]>();
+
+    items.forEach((item) => {
+      const location = item.location?.name || 'Unknown Location';
+      if (!locationGroups.has(location)) {
+        locationGroups.set(location, []);
+      }
+      locationGroups.get(location)!.push(item);
+    });
+
+    return Array.from(locationGroups.entries())
+      .filter(([location, groupItems]) => {
+        // Filter out if less than 3 items
+        if (groupItems.length < 3) return false;
+
+        // Filter out if user already has a similar location-based collection
+        const locationBasedCollectionExists = existingCollections.some(
+          (collection) =>
+            collection.name.toLowerCase().includes(location.toLowerCase()) ||
+            (collection.name.toLowerCase().includes('items') &&
+              this.calculateCollectionSimilarity(
+                collection.name,
+                `${location} Items`,
+              ) > 0.7),
+        );
+
+        return !locationBasedCollectionExists;
+      })
+      .map(([location, groupItems]) => {
+        const baseSuggestion = {
+          name: `${location} Items`,
+          description: `Items located in ${location}`,
+          itemIds: groupItems.map((item) => item.id),
+          itemNames: groupItems.map((item) => item.name),
+          suggestedBy: 'location' as const,
+          confidence: 0.9,
+        };
+        return this.addCollectionAwareness(groupItems, baseSuggestion);
+      });
+  }
+
+  private groupByPrice(
+    items: any[],
+    existingCollections: any[] = [],
+  ): CollectionSuggestion[] {
+    const suggestions: CollectionSuggestion[] = [];
+    const pricedItems = items.filter((item) => item.price && !item.priceless);
+    const pricelessItems = items.filter((item) => item.priceless);
+
+    // Check if user already has price-based collections
+    const hasPriceBasedCollections = existingCollections.some((collection) => {
+      const name = collection.name.toLowerCase();
+      return (
+        name.includes('budget') ||
+        name.includes('expensive') ||
+        name.includes('cheap') ||
+        name.includes('costly') ||
+        name.includes('priceless') ||
+        name.includes('valuable') ||
+        name.includes('affordable') ||
+        name.includes('premium')
+      );
+    });
+
+    // Only suggest price-based collections if user doesn't already organize by price
+    if (!hasPriceBasedCollections && pricedItems.length >= 3) {
+      const lowPriceItems = pricedItems.filter((item) => item.price < 1000);
+      const highPriceItems = pricedItems.filter((item) => item.price >= 5000);
+
+      if (lowPriceItems.length >= 3) {
+        const baseSuggestion = {
+          name: 'Budget Items (Under ₹1000)',
+          description: 'Affordable items under ₹1000',
+          itemIds: lowPriceItems.map((item) => item.id),
+          itemNames: lowPriceItems.map((item) => item.name),
+          suggestedBy: 'price' as const,
+          confidence: 0.7,
+        };
+        suggestions.push(
+          this.addCollectionAwareness(lowPriceItems, baseSuggestion),
+        );
+      }
+
+      if (highPriceItems.length >= 3) {
+        const baseSuggestion = {
+          name: 'Expensive Items (₹5000+)',
+          description: 'High-value items worth ₹5000 or more',
+          itemIds: highPriceItems.map((item) => item.id),
+          itemNames: highPriceItems.map((item) => item.name),
+          suggestedBy: 'price' as const,
+          confidence: 0.7,
+        };
+        suggestions.push(
+          this.addCollectionAwareness(highPriceItems, baseSuggestion),
+        );
+      }
+    }
+
+    if (!hasPriceBasedCollections && pricelessItems.length >= 3) {
+      const baseSuggestion = {
+        name: 'Priceless Items',
+        description: 'Items with sentimental or unmeasurable value',
+        itemIds: pricelessItems.map((item) => item.id),
+        itemNames: pricelessItems.map((item) => item.name),
+        suggestedBy: 'price' as const,
+        confidence: 0.8,
+      };
+      suggestions.push(
+        this.addCollectionAwareness(pricelessItems, baseSuggestion),
+      );
+    }
+
+    return suggestions;
+  }
+
+  private groupByPattern(
+    items: any[],
+    existingCollections: any[] = [],
+  ): CollectionSuggestion[] {
+    const suggestions: CollectionSuggestion[] = [];
+
+    // Only suggest pattern-based collections if user doesn't have too many collections yet
+    const hasRecentlyCreatedCollections = existingCollections.some(
+      (collection) =>
+        collection.name.toLowerCase().includes('recent') ||
+        collection.name.toLowerCase().includes('new') ||
+        collection.name.toLowerCase().includes('latest'),
+    );
+
+    // Recent additions (only if user doesn't have a recent-based collection)
+    if (!hasRecentlyCreatedCollections) {
+      const recentItems = items.filter((item) => {
+        const weekAgo = new Date();
+        weekAgo.setDate(weekAgo.getDate() - 7);
+        return item.createdAt >= weekAgo;
+      });
+
+      if (recentItems.length >= 3) {
+        const baseSuggestion = {
+          name: 'Recent Additions',
+          description: 'Items added in the last 7 days',
+          itemIds: recentItems.map((item) => item.id),
+          itemNames: recentItems.map((item) => item.name),
+          suggestedBy: 'pattern' as const,
+          confidence: 0.6,
+        };
+        suggestions.push(
+          this.addCollectionAwareness(recentItems, baseSuggestion),
+        );
+      }
+    }
+
+    // Items without photos (only if user has more than 2 collections - suggesting organization improvement)
+    if (existingCollections.length > 2) {
+      const noPhotoItems = items.filter((item) => !item.imageUrl);
+      if (noPhotoItems.length >= 3) {
+        const baseSuggestion = {
+          name: 'Items Without Photos',
+          description:
+            'Items that could benefit from photos for better organization',
+          itemIds: noPhotoItems.map((item) => item.id),
+          itemNames: noPhotoItems.map((item) => item.name),
+          suggestedBy: 'pattern' as const,
+          confidence: 0.5,
+        };
+        suggestions.push(
+          this.addCollectionAwareness(noPhotoItems, baseSuggestion),
+        );
+      }
+    }
+
+    return suggestions;
+  }
+
+  private async getGeminiSuggestions(
+    items: any[],
+    existingCollections: any[],
+  ): Promise<CollectionSuggestion[]> {
+    const startTime = Date.now();
+    console.log(
+      `🤖 [Gemini] Starting collection suggestions analysis for ${items.length} items, ${existingCollections.length} existing collections`,
+    );
+
+    try {
+      const itemsForGemini = items.slice(0, 15).map((item) => ({
+        name: item.name,
+        location: item.location?.name || 'Unknown',
+        tags: item.tags?.map((t: any) => t.tag.name) || [],
+        description: item.description || null,
+        hasImage: !!item.imageUrl,
+        isCollected: item.collections && item.collections.length > 0,
+        existingCollections:
+          item.collections?.map((c: any) => c.collection.name) || [],
+      }));
+
+      // Separate collected and uncollected items for better context
+      const uncollectedItems = itemsForGemini.filter(
+        (item) => !item.isCollected,
+      );
+      const collectedItems = itemsForGemini.filter((item) => item.isCollected);
+
+      console.log(
+        `🤖 [Gemini] Context: ${uncollectedItems.length} uncollected, ${collectedItems.length} collected items`,
+      );
+
+      const prompt = `CONTEXT: Smart Collection Suggestions for User
+
+EXISTING USER COLLECTIONS (Don't duplicate these patterns):
+${
+  existingCollections.length > 0
+    ? existingCollections
+        .map(
+          (c) =>
+            `- "${c.name}" (${c.itemCount || 'unknown'} items)${c.description ? ` - ${c.description}` : ''}`,
+        )
+        .join('\n')
+    : '- No collections yet'
+}
+
+ITEMS ALREADY ORGANIZED:
+${
+  collectedItems.length > 0
+    ? collectedItems
+        .map(
+          (item, i) =>
+            `${i + 1}. ${item.name} (In: ${item.existingCollections.join(', ')})`,
+        )
+        .join('\n')
+    : '- No items organized yet'
+}
+
+ITEMS NEEDING ORGANIZATION:
+${
+  uncollectedItems.length > 0
+    ? uncollectedItems
+        .map(
+          (item, i) =>
+            `${i + 1}. ${item.name} (Location: ${item.location}${item.tags.length > 0 ? `, Tags: ${item.tags.join(', ')}` : ''}${item.description ? `, Description: ${item.description}` : ''})`,
+        )
+        .join('\n')
+    : '- All items are organized'
+}
+
+TASK: Suggest 2-3 NEW collection ideas that:
+1. Are DIFFERENT from existing collections (avoid duplicating organization patterns)
+2. Focus primarily on unorganized items, but can include organized items for cross-collection themes
+3. Complement the user's current organization style
+4. Are practical and genuinely useful
+5. Have at least 3 items each
+
+AVOID these patterns already used by the user:
+${existingCollections.map((c) => `- Similar to "${c.name}"`).join('\n')}
+
+Focus on fresh organizational angles like:
+- Item types not yet organized (electronics, books, clothes, tools)
+- Functional purposes (work setup, travel gear, fitness, hobbies)
+- Brands or quality levels
+- Usage frequency or importance
+- Seasonal or occasion-based groupings
+- Similar descriptions or item purposes
+- Items that serve similar functions based on their descriptions
+
+If remaining items are too few or don't form meaningful new patterns, return fewer suggestions or empty array.
+
+Return JSON: [{"name": "Collection Name", "description": "Brief description of why this collection is useful", "itemNames": ["item1", "item2", "item3"]}]`;
+
+      console.log(
+        `🤖 [Gemini] Calling API with prompt length: ${prompt.length} characters`,
+      );
+
+      const model = this.genAI.getGenerativeModel({
+        model: 'gemini-1.5-flash',
+      });
+
+      const result = await model.generateContent({
+        contents: [{ role: 'user', parts: [{ text: prompt }] }],
+        generationConfig: {
+          temperature: 0.3,
+          maxOutputTokens: 500,
+        },
+      });
+
+      const responseText = result.response.text();
+      const responseTime = Date.now() - startTime;
+
+      console.log(`🤖 [Gemini] API call completed in ${responseTime}ms`);
+      console.log(
+        `🤖 [Gemini] Raw response length: ${responseText.length} characters`,
+      );
+
+      const cleanedResponse = this.cleanJsonResponse(responseText);
+      console.log(`🤖 [Gemini] Cleaned response: ${cleanedResponse}`);
+
+      const geminiSuggestions = JSON.parse(cleanedResponse);
+      console.log(
+        `🤖 [Gemini] Parsed ${geminiSuggestions.length} suggestions from AI`,
+      );
+
+      const finalSuggestions = geminiSuggestions
+        .map((suggestion: any) => {
+          const matchingItems = items.filter((item) =>
+            suggestion.itemNames.includes(item.name),
+          );
+
+          const baseSuggestion = {
+            name: suggestion.name,
+            description: suggestion.description,
+            itemIds: matchingItems.map((item) => item.id),
+            itemNames: matchingItems.map((item) => item.name),
+            suggestedBy: 'gemini' as const,
+            confidence: 0.85,
+          };
+
+          return this.addCollectionAwareness(matchingItems, baseSuggestion);
+        })
+        .filter((s: CollectionSuggestion) => s.itemIds.length >= 3);
+
+      const totalTime = Date.now() - startTime;
+      console.log(
+        `🤖 [Gemini] SUCCESS: Generated ${finalSuggestions.length} valid suggestions in ${totalTime}ms`,
+      );
+
+      if (finalSuggestions.length > 0) {
+        console.log(
+          `🤖 [Gemini] Suggestions: ${finalSuggestions.map((s) => `"${s.name}" (${s.itemIds.length} items)`).join(', ')}`,
+        );
+      }
+
+      return finalSuggestions;
+    } catch (error) {
+      const errorTime = Date.now() - startTime;
+      console.error(
+        `🤖 [Gemini] ERROR: Failed after ${errorTime}ms:`,
+        error.message,
+      );
+      console.error(`🤖 [Gemini] Error details:`, error);
+      return [];
+    }
+  }
+
+  private rankSuggestions(
+    suggestions: CollectionSuggestion[],
+  ): CollectionSuggestion[] {
+    return suggestions
+      .sort((a, b) => {
+        // Sort by confidence first, then by number of items
+        if (b.confidence !== a.confidence) {
+          return b.confidence - a.confidence;
+        }
+        return b.itemIds.length - a.itemIds.length;
+      })
+      .slice(0, 5); // Return top 5 suggestions
+  }
+
+  async generateCollectionSuggestions(
+    userId: string,
+    limit: number = 5,
+  ): Promise<CollectionSuggestionsResponse> {
+    const user = await this.prisma.user.findUnique({ where: { id: userId } });
+    if (!user) {
+      throw new InternalServerErrorException('User not found for suggestions.');
+    }
+
+    // Check daily query limit
+    let currentQueries = user.aiQueriesToday;
+    if (!isToday(user.aiLastQueryAt)) {
+      currentQueries = 0;
+    }
+
+    if (currentQueries >= this.dailyQueryLimit) {
+      const resetTime = this.calculateResetTime(user);
+      throw new ForbiddenException({
+        message: `You have reached your daily limit of ${this.dailyQueryLimit} AI queries. Your limit will reset tomorrow.`,
+        queryStatus: {
+          remaining: 0,
+          total: this.dailyQueryLimit,
+          resetTime,
+        },
+      });
+    }
+
+    // Get all items for analysis (not just uncollected)
+    const allItems = await this.getAllUserItems(userId);
+    const uncollectedItems = allItems.filter(
+      (item) => item.collections.length === 0,
+    );
+
+    console.log(
+      `📊 [AI Service] Starting suggestion generation for user ${userId}`,
+    );
+    console.log(
+      `📊 [AI Service] Items: ${allItems.length} total, ${uncollectedItems.length} uncollected`,
+    );
+
+    if (allItems.length < 3) {
+      console.log(
+        `⏹️ [AI Service] Insufficient items (${allItems.length} < 3), returning empty suggestions`,
+      );
+      return {
+        suggestions: [],
+        totalUncollectedItems: uncollectedItems.length,
+      };
+    }
+
+    // Get existing collections for smart filtering
+    const existingCollections = await this.prisma.collection
+      .findMany({
+        where: { ownerId: userId },
+        select: {
+          id: true,
+          name: true,
+          description: true,
+          _count: { select: { items: true } },
+        },
+      })
+      .then((collections) =>
+        collections.map((c) => ({
+          id: c.id,
+          name: c.name,
+          description: c.description,
+          itemCount: c._count.items,
+        })),
+      );
+
+    console.log(
+      `📊 [AI Service] Found ${existingCollections.length} existing collections: ${existingCollections.map((c) => c.name).join(', ')}`,
+    );
+
+    // Generate suggestions using ALL items
+    console.log(`🔄 [AI Service] Generating rule-based suggestions...`);
+    const locationSuggestions = this.groupByLocation(
+      allItems,
+      existingCollections,
+    );
+    const priceSuggestions = this.groupByPrice(allItems, existingCollections);
+    const patternSuggestions = this.groupByPattern(
+      allItems,
+      existingCollections,
+    );
+
+    console.log(
+      `🔄 [AI Service] Rule-based results: ${locationSuggestions.length} location, ${priceSuggestions.length} price, ${patternSuggestions.length} pattern`,
+    );
+
+    let allSuggestions = [
+      ...locationSuggestions,
+      ...priceSuggestions,
+      ...patternSuggestions,
+    ];
+
+    // Add Gemini suggestions for users with 3+ items
+    if (allItems.length >= 3) {
+      console.log(
+        `✅ [AI Service] Triggering Gemini analysis (${allItems.length} items >= 3 threshold)`,
+      );
+      const geminiSuggestions = await this.getGeminiSuggestions(
+        allItems,
+        existingCollections,
+      );
+      console.log(
+        `✅ [AI Service] Gemini returned ${geminiSuggestions.length} suggestions`,
+      );
+      allSuggestions = [...allSuggestions, ...geminiSuggestions];
+    } else {
+      console.log(
+        `⏭️ [AI Service] Skipping Gemini (${allItems.length} items < 3 threshold)`,
+      );
+    }
+
+    // Smart filtering: Remove overly similar or redundant suggestions
+    const smartFilteredSuggestions = allSuggestions.filter(
+      (suggestion) =>
+        !this.shouldSuppressSuggestion(suggestion, existingCollections),
+    );
+
+    const rankedSuggestions = this.rankSuggestions(smartFilteredSuggestions);
+
+    console.log(
+      `🎯 [AI Service] Final results: ${rankedSuggestions.length} suggestions after ranking and filtering`,
+    );
+    console.log(
+      `🎯 [AI Service] Returning ${Math.min(rankedSuggestions.length, limit)} suggestions (limit: ${limit})`,
+    );
+
+    // Update user query count
+    await this.prisma.user.update({
+      where: { id: userId },
+      data: {
+        aiQueriesToday: currentQueries + 1,
+        aiLastQueryAt: new Date(),
+      },
+    });
+
+    const finalResponse = {
+      suggestions: rankedSuggestions.slice(0, limit),
+      totalUncollectedItems: uncollectedItems.length,
+    };
+
+    console.log(
+      `✅ [AI Service] Completed suggestion generation for user ${userId}`,
+    );
+
+    return finalResponse;
   }
 }

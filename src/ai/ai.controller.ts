@@ -1,4 +1,12 @@
-import { Controller, Post, Body, Req, UseGuards, Get } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Body,
+  Req,
+  UseGuards,
+  Get,
+  Query,
+} from '@nestjs/common';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { AiService } from './ai.service';
 import { AskQuestionDto } from './dto/ask-question.dto';
@@ -30,7 +38,7 @@ export class AiController {
   }
 
   @Get('query-status')
-  async getQueryStatus(@Req() req): Promise<{
+  async getQueryStatus(@Req() req: RequestWithUser): Promise<{
     remaining: number;
     total: number;
     resetTime?: Date;
@@ -54,5 +62,17 @@ export class AiController {
   ) {
     const { imageData, mimeType } = analyzeImageDto;
     return this.aiService.analyzeImage(req.user.id, imageData, mimeType);
+  }
+
+  @Get('collection-suggestions')
+  async getCollectionSuggestions(
+    @Req() req: RequestWithUser,
+    @Query('limit') limit?: string,
+  ) {
+    const limitNumber = limit ? parseInt(limit, 10) : 5;
+    return this.aiService.generateCollectionSuggestions(
+      req.user.id,
+      limitNumber,
+    );
   }
 }

@@ -10,27 +10,28 @@ import { PrismaService } from '../../prisma/prisma.service';
 const DEFAULT_LOCATIONS = [
   'Kitchen',
   'Bedroom',
-  'Living Room',
+  'Shoe Rack',
   'Bathroom',
-  'Garage',
-  'Attic',
+  'Bedbox',
+  'Study Table',
   'Basement',
-  'Office',
-  'Closet',
+  'Office Table',
+  'Almirah #1',
   'Storage Room',
 ];
 
 const DEFAULT_TAGS = [
   'Electronics',
   'Clothing',
-  'Books',
-  'Kitchen',
+  'Books & Documents',
+  'Kitchenware',
   'Furniture',
   'Tools',
   'Decor',
-  'Sports',
+  'Sports & Fitness',
   'Beauty',
   'Toys',
+  'Gift',
 ];
 
 @Injectable()
