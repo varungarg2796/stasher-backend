@@ -388,6 +388,46 @@ SAMPLE ACTIVE ITEMS (showing first 8 of ${activeItems.length}):
     return cleaned;
   }
 
+  private cleanImageAnalysisJsonResponse(response: string): string {
+    // Remove markdown code block markers
+    let cleaned = response.replace(/```json\s*/g, '').replace(/```\s*/g, '');
+
+    // Remove any leading/trailing whitespace
+    cleaned = cleaned.trim();
+
+    // Handle common Gemini response patterns for image analysis
+    // Pattern 1: Single object {"name": ..., "tags": ...} - prioritize this first
+    const objectMatch = cleaned.match(/\{[\s\S]*\}/);
+    if (objectMatch) {
+      return objectMatch[0]; // Return single object
+    }
+
+    // Pattern 2: Array format [{"name": ...}, {"name": ...}]
+    const arrayMatch = cleaned.match(/\[[\s\S]*\]/);
+    if (arrayMatch) {
+      return arrayMatch[0];
+    }
+
+    // Pattern 3: Multiple objects separated by commas: {"name": ...}, {"name": ...}
+    // Convert to proper array format
+    if (cleaned.includes('"},') && !cleaned.startsWith('[')) {
+      // Split by "},\s*{" to find object boundaries
+      const objectParts = cleaned.split(/\},\s*\{/);
+      if (objectParts.length > 1) {
+        // Reconstruct as proper array
+        const fixedObjects = objectParts.map((part, index) => {
+          if (index === 0) return part + '}'; // First object
+          if (index === objectParts.length - 1) return '{' + part; // Last object
+          return '{' + part + '}'; // Middle objects
+        });
+        return '[' + fixedObjects.join(', ') + ']';
+      }
+    }
+
+    // Fallback: return as is
+    return cleaned;
+  }
+
   private analyzeQueryIntent(question: string): {
     type:
       | 'search'
@@ -869,26 +909,53 @@ Please analyze the inventory and collections and provide a helpful, well-formatt
       const responseText = result.response.text();
 
       // 5. Clean and parse the JSON response from the AI
-      const cleanedResponse = this.cleanJsonResponse(responseText);
+      const cleanedResponse = this.cleanImageAnalysisJsonResponse(responseText);
 
       let parsedResponse;
       try {
         parsedResponse = JSON.parse(cleanedResponse);
 
-        // Handle case where cleanJsonResponse wrapped single object in array
-        if (Array.isArray(parsedResponse) && parsedResponse.length === 1) {
+        // Handle case where response is an array - take the first object
+        if (Array.isArray(parsedResponse)) {
+          if (parsedResponse.length === 0) {
+            throw new Error('AI returned an empty array.');
+          }
           parsedResponse = parsedResponse[0];
         }
-      } catch (parseError) {
-        console.error(`🖼️ [Image Analysis] JSON parse failed:`, parseError);
+      } catch {
         throw new Error('AI returned an invalid JSON structure.');
       }
 
-      // 6. Basic validation of the AI's response
-      if (!parsedResponse.name || !Array.isArray(parsedResponse.tags)) {
-        console.error(`🖼️ [Image Analysis] Validation failed:`, parsedResponse);
+      // 6. Basic validation and cleanup of the AI's response
+      // More robust validation with fallbacks
+      if (!parsedResponse || typeof parsedResponse !== 'object') {
         throw new Error('AI returned an invalid JSON structure.');
       }
+
+      // Ensure name exists and is a string
+      if (!parsedResponse.name || typeof parsedResponse.name !== 'string') {
+        throw new Error('AI returned an invalid JSON structure.');
+      }
+
+      // Ensure tags exists and is an array, or convert if possible
+      if (!parsedResponse.tags) {
+        parsedResponse.tags = [];
+      } else if (!Array.isArray(parsedResponse.tags)) {
+        if (typeof parsedResponse.tags === 'string') {
+          // If tags is a comma-separated string, split it
+          parsedResponse.tags = parsedResponse.tags
+            .split(',')
+            .map((tag: string) => tag.trim())
+            .filter((tag: string) => tag.length > 0);
+        } else {
+          throw new Error('AI returned an invalid JSON structure.');
+        }
+      }
+
+      // Filter out any non-string tags
+      parsedResponse.tags = parsedResponse.tags.filter(
+        (tag: any) => typeof tag === 'string' && tag.trim().length > 0,
+      );
 
       // Update user analysis count
       await this.prisma.user.update({
