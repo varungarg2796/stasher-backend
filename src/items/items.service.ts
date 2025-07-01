@@ -178,6 +178,8 @@ export class ItemsService {
     if (sort === 'oldest') orderBy = { createdAt: 'asc' };
     if (sort === 'name-asc') orderBy = { name: 'asc' };
     if (sort === 'name-desc') orderBy = { name: 'desc' };
+    if (sort === 'quantity-high') orderBy = { quantity: 'desc' };
+    if (sort === 'quantity-low') orderBy = { quantity: 'asc' };
     const [items, totalItems] = await this.prisma.$transaction([
       this.prisma.item.findMany({
         where,

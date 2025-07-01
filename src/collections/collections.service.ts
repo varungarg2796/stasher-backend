@@ -54,16 +54,37 @@ export class CollectionsService {
     return this.prisma.collection.findMany({
       where: { ownerId: userId },
       orderBy: { updatedAt: 'desc' },
-      include: { _count: { select: { items: true } } }, // Include item count
+      include: {
+        _count: {
+          select: {
+            items: {
+              where: {
+                item: {
+                  archived: false,
+                },
+              },
+            },
+          },
+        },
+      }, // Include non-archived item count only
     });
   }
 
-  async findOne(id: string, userId: string) {
+  async findOne(id: string, userId: string, includeArchived = false) {
     await this.verifyOwnership(id, userId);
+    const whereClause = includeArchived
+      ? {}
+      : {
+          item: {
+            archived: false,
+          },
+        };
+
     return this.prisma.collection.findUnique({
       where: { id },
       include: {
         items: {
+          where: whereClause,
           orderBy: { order: 'asc' },
           include: { item: true }, // Include the full item details
         },

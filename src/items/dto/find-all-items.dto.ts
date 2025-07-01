@@ -27,7 +27,7 @@ export class FindAllItemsDto {
   archived?: string;
 
   @IsOptional()
-  @IsIn(['newest', 'oldest', 'name-asc', 'name-desc'])
+  @IsIn(['newest', 'oldest', 'name-asc', 'name-desc', 'quantity-high', 'quantity-low'])
   sort?: string = 'newest'; // Default sort
 
   @IsOptional()

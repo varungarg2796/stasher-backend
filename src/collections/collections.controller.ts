@@ -11,6 +11,7 @@ import {
   HttpCode,
   HttpStatus,
   Put,
+  Query,
 } from '@nestjs/common';
 import { CollectionsService } from './collections.service';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
@@ -44,8 +45,17 @@ export class CollectionsController {
   }
 
   @Get(':id')
-  findOne(@Param('id') id: string, @Req() req: RequestWithUser) {
-    return this.collectionsService.findOne(id, req.user.id);
+  findOne(
+    @Param('id') id: string,
+    @Query('includeArchived') includeArchived: string,
+    @Req() req: RequestWithUser,
+  ) {
+    const includeArchivedBool = includeArchived === 'true';
+    return this.collectionsService.findOne(
+      id,
+      req.user.id,
+      includeArchivedBool,
+    );
   }
 
   @Patch(':id')

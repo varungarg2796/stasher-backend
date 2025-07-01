@@ -15,6 +15,11 @@ export class ShareService {
               select: { username: true }, // Select only the public username
             },
             items: {
+              where: {
+                item: {
+                  archived: false,
+                },
+              },
               orderBy: { order: 'asc' },
               include: {
                 item: {
